@@ -158,9 +158,10 @@
         <button id="sendBtn" class="btn-primary">发送</button>
         <button id="abortBtn" class="btn-danger hidden">停止</button>
         <button id="newBtn" class="btn-secondary">新会话</button>
+        <button id="effortBtn" class="effort-btn" title="思考等级（点击切换）">↻ <span id="effortLabel">medium</span></button>
       </div>
     </div>
-    <div class="input-footer"><span id="sessionInfo"></span><button id="effortBtn" class="effort-btn" title="思考等级（点击切换）">↻ 思考: <span id="effortLabel">medium</span></button></div>
+    <div class="input-footer"><button id="requestLogsBtn" class="effort-btn" title="对话日志">📋 对话日志</button><button id="skillsBtn" class="effort-btn" title="技能管理">🧩 技能管理</button><button id="gitCommitBtn" class="effort-btn" title="Git 提交助手">📝 git提交</button><button id="initProjectBtn" class="effort-btn" title="分析项目并生成 CLAUDE.md">📋 初始化项目</button><button id="showHelpBtn" class="effort-btn" title="显示所有命令">❓ 查看所有命令</button></div>
   </footer>
   </div><!-- end #mainArea -->
   <div id="filePanelResizeHandle" class="panel-resize-handle"></div>
@@ -183,10 +184,71 @@
       <span class="folder-path" id="fbPath"></span>
       <button id="fbCloseBtn" class="btn-icon" title="关闭">✕</button>
     </div>
+    <div class="folder-search">
+      <input id="fbSearchInput" type="text" placeholder="搜索当前目录..." autocomplete="off" />
+    </div>
     <div class="folder-body" id="fbBody"></div>
     <div class="folder-footer">
       <button id="fbSelectBtn" class="btn-primary">选择当前目录</button>
       <button id="fbCancelBtn" class="btn-secondary">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- Request Logs Panel -->
+<div id="requestLogsOverlay" class="folder-overlay hidden">
+  <div class="folder-panel" style="max-width:640px;">
+    <div class="folder-header">
+      <span class="folder-path">📋 对话日志</span>
+      <span style="font-size:12px;color:var(--text-tertiary);margin-left:8px;">(内存保存，刷新网页后丢失)</span>
+      <button id="requestLogsCloseBtn" class="btn-icon" title="关闭">✕</button>
+    </div>
+    <div class="folder-body" id="requestLogsBody" style="min-height:200px;"></div>
+    <div class="folder-footer">
+      <button id="requestLogsRefreshBtn" class="btn-secondary">刷新</button>
+      <button id="requestLogsCloseBtn2" class="btn-secondary">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Skills Management Panel -->
+<div id="skillsOverlay" class="folder-overlay hidden">
+  <div class="folder-panel" style="max-width:700px;">
+    <div class="folder-header">
+      <span class="folder-path">🧩 技能管理</span>
+      <button id="skillsOpenDirBtn" class="btn-icon" title="打开 Skills 目录">📂</button>
+      <button id="skillsCloseBtn" class="btn-icon" title="关闭">✕</button>
+    </div>
+    <!-- List View -->
+    <div id="skillsListView">
+      <div class="folder-search">
+        <input id="skillsSearchInput" type="text" placeholder="搜索技能..." autocomplete="off" />
+      </div>
+      <div class="folder-body" id="skillsBody" style="min-height:200px;"></div>
+      <div class="folder-footer">
+        <button id="skillsCreateBtn" class="btn-primary">新建技能</button>
+        <button id="skillsRefreshBtn" class="btn-secondary">刷新</button>
+        <button id="skillsCloseBtn2" class="btn-secondary">关闭</button>
+      </div>
+    </div>
+    <!-- Create/Edit View -->
+    <div id="skillsEditView" class="hidden">
+      <div class="folder-body" style="padding:16px;">
+        <div class="skills-form">
+          <div class="skills-form-group">
+            <label for="skillNameInput">技能名称</label>
+            <input id="skillNameInput" type="text" placeholder="例如: code-review（仅字母、数字、连字符、下划线）" />
+          </div>
+          <div class="skills-form-group">
+            <label for="skillContentInput">SKILL.md 内容</label>
+            <textarea id="skillContentInput" rows="14" placeholder="---&#10;description: 技能描述...&#10;---&#10;&#10;## Instructions&#10;&#10;技能内容..."></textarea>
+          </div>
+        </div>
+      </div>
+      <div class="folder-footer">
+        <button id="skillsSaveBtn" class="btn-primary">保存</button>
+        <button id="skillsCancelBtn" class="btn-secondary">返回</button>
+      </div>
     </div>
   </div>
 </div>

@@ -68,6 +68,18 @@ const pendingApprovals = new Map();
 const planModeStates = new Map(); // sessionId -> { enabled: boolean, pendingPlan: boolean }
 const pendingBtwMessages = new Map(); // ws -> [{ question, answer }]  /btw 待注入队列
 
+// --- 对话日志（内存保存，重启丢失） ---
+const requestLogs = []; // { id, url, model, startTime, endTime, status, error }
+const MAX_REQUEST_LOGS = 100;
+
+function addRequestLog(entry) {
+  requestLogs.unshift(entry);
+  if (requestLogs.length > MAX_REQUEST_LOGS) requestLogs.length = MAX_REQUEST_LOGS;
+}
+
+// --- 请求超时配置 ---
+const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟
+
 // --- Helpers ---
 function uid() {
   return crypto.randomUUID?.() ?? crypto.randomBytes(16).toString('hex');
@@ -80,21 +92,34 @@ function wsSend(ws, data) {
 }
 
 // --- Tool Approval ---
-function waitForApproval(requestId, signal) {
+function waitForApproval(requestId, signal, ws) {
   return new Promise((resolve) => {
     let settled = false;
+    let timer = null;
     const finalize = (v) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       pendingApprovals.delete(requestId);
       if (signal) signal.removeEventListener('abort', onAbort);
+      if (ws) ws.removeEventListener('close', onWsClose);
       resolve(v);
     };
     const onAbort = () => finalize({ cancelled: true });
+    const onWsClose = () => finalize({ cancelled: true });
     if (signal) {
       if (signal.aborted) return finalize({ cancelled: true });
       signal.addEventListener('abort', onAbort, { once: true });
     }
+    // WebSocket 断连时自动取消审批等待
+    if (ws) {
+      ws.addEventListener('close', onWsClose, { once: true });
+    }
+    // 审批超时：5 分钟无响应自动取消
+    timer = setTimeout(() => {
+      console.log(`[approval] 请求 ${requestId} 审批超时`);
+      finalize({ cancelled: true });
+    }, REQUEST_TIMEOUT_MS);
     pendingApprovals.set(requestId, finalize);
   });
 }
@@ -165,7 +190,7 @@ async function runQuery(prompt, options, ws) {
         input,
         sessionId,
       });
-      const decision = await waitForApproval(requestId, context?.signal);
+      const decision = await waitForApproval(requestId, context?.signal, ws);
       if (!decision || decision.cancelled) {
         wsSend(ws, { type: 'permission-cancelled', requestId, sessionId });
         return { behavior: 'deny', message: '计划执行已取消' };
@@ -186,7 +211,7 @@ async function runQuery(prompt, options, ws) {
       requestId, toolName, input,
       sessionId,
     });
-    const decision = await waitForApproval(requestId, context?.signal);
+    const decision = await waitForApproval(requestId, context?.signal, ws);
     if (!decision || decision.cancelled) {
       wsSend(ws, { type: 'permission-cancelled', requestId, sessionId });
       return { behavior: 'deny', message: 'Permission denied or cancelled' };
@@ -227,6 +252,18 @@ async function runQuery(prompt, options, ws) {
   const reqLogTime = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
   console.log(`[AI Request] 地址: ${effectiveBaseUrl} | 模型: ${sdkOpts.model} | 时间: ${reqLogTime}`);
 
+  // 对话日志
+  const logEntry = {
+    id: uid(),
+    url: effectiveBaseUrl,
+    model: sdkOpts.model,
+    startTime: Date.now(),
+    endTime: null,
+    status: 'running',
+    error: null,
+  };
+  addRequestLog(logEntry);
+
   const qi = sdkQuery({ prompt: sdkPrompt, options: sdkOpts });
 
   if (prev !== undefined) process.env.CLAUDE_CODE_STREAM_CLOSE_TIMEOUT = prev;
@@ -234,8 +271,34 @@ async function runQuery(prompt, options, ws) {
 
   if (sessionId) activeSessions.set(sessionId, qi);
 
+  // 5 分钟超时机制
+  let lastActivity = Date.now();
+  let timeoutTimer = null;
+  const resetTimeout = () => { lastActivity = Date.now(); };
+  const startTimeoutWatch = () => {
+    timeoutTimer = setInterval(() => {
+      if (Date.now() - lastActivity > REQUEST_TIMEOUT_MS) {
+        console.error(`[timeout] 请求超时（${REQUEST_TIMEOUT_MS / 1000}s 无活动）`);
+        clearInterval(timeoutTimer);
+        timeoutTimer = null;
+        qi.interrupt?.().catch(() => {});
+        wsSend(ws, { type: 'claude-error', error: `请求超时（${REQUEST_TIMEOUT_MS / 1000}秒无响应）`, sessionId });
+      }
+    }, 5000);
+  };
+  startTimeoutWatch();
+
+  // WebSocket 断连时中断查询
+  const onWsClose = () => {
+    console.log(`[ws-close] 客户端断连，中断查询 ${sessionId || '(无session)'}`);
+    qi.interrupt?.().catch(() => {});
+    if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
+  };
+  ws.addEventListener('close', onWsClose, { once: true });
+
   try {
     for await (const msg of qi) {
+      resetTimeout();
       // Capture session id
       if (msg.session_id && !sessionId) {
         sessionId = msg.session_id;
@@ -273,6 +336,7 @@ async function runQuery(prompt, options, ws) {
       activeSessions.set(sessionId, qi2);
 
       for await (const msg of qi2) {
+        resetTimeout();
         wsSend(ws, { type: 'claude-response', data: msg, sessionId });
         if (msg.type === 'result' && msg.modelUsage) {
           const mk = Object.keys(msg.modelUsage)[0];
@@ -290,10 +354,17 @@ async function runQuery(prompt, options, ws) {
     }
 
     wsSend(ws, { type: 'claude-complete', sessionId });
+    logEntry.status = 'completed';
+    logEntry.endTime = Date.now();
   } catch (err) {
     console.error('SDK error:', err.message);
     wsSend(ws, { type: 'claude-error', error: err.message, sessionId });
+    logEntry.status = 'error';
+    logEntry.endTime = Date.now();
+    logEntry.error = err.message;
   } finally {
+    if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
+    ws.removeEventListener('close', onWsClose);
     if (sessionId) activeSessions.delete(sessionId);
     // Restore env vars
     if (prevBaseUrl !== undefined) process.env.ANTHROPIC_BASE_URL = prevBaseUrl;
@@ -546,6 +617,84 @@ app.post('/api/settings', async (req, res) => {
   }
 });
 
+// API: 请求记录（内存保存，重启丢失）
+app.get('/api/request-logs', (req, res) => {
+  res.json(requestLogs);
+});
+
+// API: Skills 管理
+app.get('/api/skills-dir', (req, res) => {
+  const skillsDir = path.join(os.homedir(), '.claude', 'skills');
+  res.json({ path: skillsDir });
+});
+
+app.get('/api/skills', async (req, res) => {
+  try {
+    const skillsDir = path.join(os.homedir(), '.claude', 'skills');
+    await fs.mkdir(skillsDir, { recursive: true });
+    const entries = await fs.readdir(skillsDir, { withFileTypes: true });
+    const skills = [];
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue;
+      const mdPath = path.join(skillsDir, ent.name, 'SKILL.md');
+      const content = await fs.readFile(mdPath, 'utf8').catch(() => null);
+      if (content === null) continue;
+      let description = '';
+      const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (fmMatch) {
+        const descMatch = fmMatch[1].match(/description:\s*(.+)/);
+        if (descMatch) description = descMatch[1].trim();
+      }
+      skills.push({ name: ent.name, description, content });
+    }
+    skills.sort((a, b) => a.name.localeCompare(b.name));
+    res.json(skills);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/skills', async (req, res) => {
+  try {
+    const { name, content } = req.body;
+    if (!name || !content) return res.status(400).json({ error: 'name and content required' });
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      return res.status(400).json({ error: '名称只能包含字母、数字、连字符和下划线' });
+    }
+    if (name.length > 64) {
+      return res.status(400).json({ error: '名称长度不能超过64个字符' });
+    }
+    const skillDir = path.join(os.homedir(), '.claude', 'skills', name);
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(path.join(skillDir, 'SKILL.md'), content, 'utf-8');
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete('/api/skills/:name', async (req, res) => {
+  try {
+    const name = req.params.name;
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      return res.status(400).json({ error: '无效的技能名称' });
+    }
+    const skillDir = path.join(os.homedir(), '.claude', 'skills', name);
+    await fs.access(skillDir);
+    if (process.platform === 'win32') {
+      const safePath = skillDir.replace(/'/g, "''");
+      const cmd = `powershell.exe -Command "Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory('${safePath}', 'OnlyErrorDialogs', 'SendToRecycleBin')"`;
+      await execAsync(cmd);
+    } else {
+      await fs.rm(skillDir, { recursive: true });
+    }
+    res.json({ success: true });
+  } catch (e) {
+    if (e.code === 'ENOENT') return res.status(404).json({ error: '技能不存在' });
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // API: list models (proxy from external API)
 app.get('/api/models', async (req, res) => {
   const baseUrl = (req.query.baseUrl || API_BASE_URL).replace(/\/+$/, '');
@@ -713,8 +862,12 @@ app.get('/api/projects/:name/sessions/:id/messages', async (req, res) => {
 
 // API: open folder in system file explorer
 app.get('/api/open-folder', (req, res) => {
-  const dir = req.query.path;
+  let dir = req.query.path;
   if (!dir) return res.status(400).json({ error: 'path required' });
+  // 支持 ~ 开头路径解析为用户主目录
+  if (dir.startsWith('~/') || dir === '~') {
+    dir = path.join(os.homedir(), dir.slice(1));
+  }
   const cmd = process.platform === 'win32' ? `explorer "${dir}"`
     : process.platform === 'darwin' ? `open "${dir}"`
     : `xdg-open "${dir}"`;
@@ -943,7 +1096,11 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => console.log('[WS] client disconnected'));
+  ws.on('close', () => {
+    console.log('[WS] client disconnected');
+    // 清理该连接的 btw 待注入队列
+    pendingBtwMessages.delete(ws);
+  });
 });
 
 // Try to start server, auto-increment port if in use

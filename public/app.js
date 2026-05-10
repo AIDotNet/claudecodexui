@@ -19,7 +19,7 @@ const modelSelectDisplay=$('#modelSelectDisplay'), modelSelectDropdown=$('#model
   cwdDropdown=$('#cwdDropdown'),
   connStatus=$('#connStatus'), messagesEl=$('#messages'), permBanner=$('#permBanner'),
   promptInput=$('#promptInput'), sendBtn=$('#sendBtn'), abortBtn=$('#abortBtn'),
-  newBtn=$('#newBtn'), sessionInfo=$('#sessionInfo'),
+  newBtn=$('#newBtn'), sessionInfo=$('#sessionInfo') || document.createElement('span'),
   settingsBtn=$('#settingsBtn'), settingsOverlay=$('#settingsOverlay'),
   setApiKey=$('#setApiKey'),
   setBaseUrl=$('#setBaseUrl'), testBaseUrlBtn=$('#testBaseUrlBtn'), testResult=$('#testResult'),
@@ -38,7 +38,7 @@ const modelSelectDisplay=$('#modelSelectDisplay'), modelSelectDropdown=$('#model
   cwdBrowseBtn=$('#cwdBrowseBtn'),
   cwdOpenBtn=$('#cwdOpenBtn'),
   folderBrowser=$('#folderBrowser'), fbPath=$('#fbPath'), fbBody=$('#fbBody'),
-  fbSelectBtn=$('#fbSelectBtn'), fbCancelBtn=$('#fbCancelBtn'), fbCloseBtn=$('#fbCloseBtn'),
+  fbSelectBtn=$('#fbSelectBtn'), fbCancelBtn=$('#fbCancelBtn'), fbCloseBtn=$('#fbCloseBtn'), fbSearchInput=$('#fbSearchInput'),
   sidebarSearch=$('#sidebarSearch'),
   cmdDropdown=$('#cmdDropdown'),
   effortBtn=$('#effortBtn'), effortLabel=$('#effortLabel');
@@ -880,6 +880,41 @@ const TOOL_ICON = {
   settingsSaveBtn.addEventListener('click', saveSettings);
   clearPermissionsBtn.addEventListener('click', clearRememberedPermissions);
 
+  // 请求记录弹出面板
+  document.getElementById('requestLogsBtn').addEventListener('click', openRequestLogsPanel);
+  document.getElementById('requestLogsCloseBtn').addEventListener('click', closeRequestLogsPanel);
+  document.getElementById('requestLogsCloseBtn2').addEventListener('click', closeRequestLogsPanel);
+  document.getElementById('requestLogsRefreshBtn').addEventListener('click', () => loadRequestLogs(document.getElementById('requestLogsBody')));
+  document.getElementById('requestLogsOverlay').addEventListener('click', (e) => { if (e.target.id === 'requestLogsOverlay') closeRequestLogsPanel(); });
+
+  // 技能管理面板
+  document.getElementById('skillsBtn').addEventListener('click', openSkillsPanel);
+  document.getElementById('skillsCloseBtn').addEventListener('click', closeSkillsPanel);
+  document.getElementById('skillsCloseBtn2').addEventListener('click', closeSkillsPanel);
+  document.getElementById('skillsRefreshBtn').addEventListener('click', loadSkills);
+  document.getElementById('skillsOpenDirBtn').addEventListener('click', () => {
+    fetch('/api/skills-dir').then(r => r.json()).then(d => {
+      if (d.path) fetch('/api/open-folder?path=' + encodeURIComponent(d.path));
+    });
+  });
+  document.getElementById('skillsOverlay').addEventListener('click', (e) => { if (e.target.id === 'skillsOverlay') closeSkillsPanel(); });
+  document.getElementById('skillsCreateBtn').addEventListener('click', () => {
+    const template = `---\ndescription: 简要描述该技能的用途，Claude 会根据此描述自动匹配调用\n---\n\n## Instructions\n\n在此编写技能的具体指令内容...\n`;
+    showSkillEditView('', template, false);
+  });
+  document.getElementById('skillsSaveBtn').addEventListener('click', saveSkill);
+  document.getElementById('skillsCancelBtn').addEventListener('click', showSkillsListView);
+  document.getElementById('skillsSearchInput').addEventListener('input', filterSkills);
+
+  // Git 提交按钮
+  document.getElementById('gitCommitBtn').addEventListener('click', runCommit);
+
+  // 初始化项目按钮
+  document.getElementById('initProjectBtn').addEventListener('click', runInit);
+
+  // 查看所有命令按钮
+  document.getElementById('showHelpBtn').addEventListener('click', showHelp);
+
   // Copy API Key button
   document.getElementById('copyApiKeyBtn').addEventListener('click', () => {
     const key = setApiKey.value;
@@ -1018,12 +1053,232 @@ function updatePermissionCount() {
   permissionCount.textContent = `已记住 ${rememberedPermissions.size} 条权限规则`;
 }
 
+// --- 请求记录 ---
+function renderLogsToContainer(container, logs) {
+  if (!logs || logs.length === 0) {
+    container.innerHTML = '<div class="request-logs-empty">暂无请求记录</div>';
+    return;
+  }
+  container.innerHTML = '';
+  for (const log of logs) {
+    const item = document.createElement('div');
+    item.className = 'request-log-item';
+    // 状态指示灯
+    const dot = document.createElement('span');
+    dot.className = `request-log-status ${log.status}`;
+    dot.title = { running: '进行中', completed: '已完成', error: '错误', timeout: '超时' }[log.status] || log.status;
+    // 模型
+    const model = document.createElement('span');
+    model.className = 'request-log-model';
+    model.textContent = log.model || '-';
+    // URL
+    const url = document.createElement('span');
+    url.className = 'request-log-url';
+    url.textContent = log.url || '-';
+    url.title = log.url || '';
+    // 时间
+    const time = document.createElement('span');
+    time.className = 'request-log-time';
+    time.textContent = new Date(log.startTime).toLocaleTimeString('zh-CN');
+    // 耗时
+    const duration = document.createElement('span');
+    duration.className = 'request-log-duration';
+    if (log.endTime) {
+      const ms = log.endTime - log.startTime;
+      duration.textContent = ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms/1000).toFixed(1)}s` : `${Math.floor(ms/60000)}m${Math.floor((ms%60000)/1000)}s`;
+    } else {
+      duration.textContent = '...';
+    }
+    // 错误信息 tooltip
+    if (log.error) item.title = log.error;
+    item.appendChild(dot);
+    item.appendChild(model);
+    item.appendChild(url);
+    item.appendChild(time);
+    item.appendChild(duration);
+    container.appendChild(item);
+  }
+}
+
+async function loadRequestLogs(targetContainer) {
+  const container = targetContainer || document.getElementById('requestLogsContainer');
+  if (!container) return;
+  try {
+    const res = await fetch('/api/request-logs');
+    const logs = await res.json();
+    renderLogsToContainer(container, logs);
+  } catch(e) {
+    container.innerHTML = '<div class="request-logs-empty">加载失败</div>';
+  }
+}
+
+function openRequestLogsPanel() {
+  const overlay = document.getElementById('requestLogsOverlay');
+  overlay.classList.remove('hidden');
+  loadRequestLogs(document.getElementById('requestLogsBody'));
+}
+
+function closeRequestLogsPanel() {
+  document.getElementById('requestLogsOverlay').classList.add('hidden');
+}
+
+// --- Skills 管理 ---
+let skillsCache = [];
+
+async function loadSkills() {
+  const body = document.getElementById('skillsBody');
+  body.innerHTML = '<div class="request-logs-empty">加载中...</div>';
+  try {
+    const res = await fetch('/api/skills');
+    if (!res.ok) throw new Error('请求失败');
+    skillsCache = await res.json();
+    renderSkillsList(skillsCache);
+  } catch (e) {
+    body.innerHTML = '<div class="request-logs-empty">加载技能失败: ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderSkillsList(skills) {
+  const body = document.getElementById('skillsBody');
+  if (!skills || skills.length === 0) {
+    body.innerHTML = '<div class="request-logs-empty">暂无技能，点击「新建技能」创建</div>';
+    return;
+  }
+  body.innerHTML = '';
+  for (const skill of skills) {
+    const item = document.createElement('div');
+    item.className = 'skill-item';
+    item.innerHTML = `
+      <div class="skill-info">
+        <span class="skill-name">${escHtml(skill.name)}</span>
+        <span class="skill-desc">${escHtml(skill.description || '无描述')}</span>
+      </div>
+      <div class="skill-actions">
+        <button class="btn-icon skill-view-btn" title="查看内容">👁</button>
+        <button class="btn-icon skill-delete-btn" title="删除">🗑</button>
+      </div>
+    `;
+    item.querySelector('.skill-view-btn').addEventListener('click', () => {
+      showSkillEditView(skill.name, skill.content, true);
+    });
+    item.querySelector('.skill-delete-btn').addEventListener('click', () => {
+      deleteSkill(skill.name);
+    });
+    body.appendChild(item);
+  }
+}
+
+function filterSkills() {
+  const query = document.getElementById('skillsSearchInput').value.toLowerCase().trim();
+  if (!query) {
+    renderSkillsList(skillsCache);
+    return;
+  }
+  const filtered = skillsCache.filter(s =>
+    s.name.toLowerCase().includes(query) ||
+    (s.description || '').toLowerCase().includes(query)
+  );
+  renderSkillsList(filtered);
+}
+
+function showSkillEditView(name, content, readOnly) {
+  document.getElementById('skillsListView').classList.add('hidden');
+  document.getElementById('skillsEditView').classList.remove('hidden');
+  const nameInput = document.getElementById('skillNameInput');
+  const contentInput = document.getElementById('skillContentInput');
+  nameInput.value = name || '';
+  contentInput.value = content || '';
+  nameInput.disabled = !!readOnly;
+  contentInput.readOnly = !!readOnly;
+  document.getElementById('skillsSaveBtn').style.display = readOnly ? 'none' : '';
+}
+
+function showSkillsListView() {
+  document.getElementById('skillsEditView').classList.add('hidden');
+  document.getElementById('skillsListView').classList.remove('hidden');
+  document.getElementById('skillNameInput').value = '';
+  document.getElementById('skillContentInput').value = '';
+}
+
+async function saveSkill() {
+  const name = document.getElementById('skillNameInput').value.trim();
+  const content = document.getElementById('skillContentInput').value;
+  if (!name || !content) {
+    alert('请填写技能名称和内容');
+    return;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+    alert('名称只能包含字母、数字、连字符和下划线');
+    return;
+  }
+  try {
+    const res = await fetch('/api/skills', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, content }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '保存失败');
+    showSkillsListView();
+    loadSkills();
+  } catch (e) {
+    alert('保存失败: ' + e.message);
+  }
+}
+
+async function deleteSkill(name) {
+  if (!confirm(`确定要删除技能「${name}」吗？`)) return;
+  try {
+    const res = await fetch(`/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || '删除失败');
+    loadSkills();
+  } catch (e) {
+    alert('删除失败: ' + e.message);
+  }
+}
+
+function openSkillsPanel() {
+  document.getElementById('skillsOverlay').classList.remove('hidden');
+  document.getElementById('skillsSearchInput').value = '';
+  showSkillsListView();
+  loadSkills();
+}
+
+function closeSkillsPanel() {
+  document.getElementById('skillsOverlay').classList.add('hidden');
+}
+
 // --- WebSocket ---
+let wsActivityTimer = null; // 前端兜底超时
+const WS_ACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 分钟
+
+function resetActivityTimer() {
+  if (wsActivityTimer) clearTimeout(wsActivityTimer);
+  if (!isStreaming) return;
+  wsActivityTimer = setTimeout(() => {
+    if (isStreaming) {
+      console.warn('[timeout] 5分钟无消息，自动结束等待');
+      finishStreaming(); closeGroup(); setStreaming(false);
+      appendSystemMsg('请求超时：5分钟未收到响应，已自动结束等待', 'error');
+    }
+  }, WS_ACTIVITY_TIMEOUT);
+}
+
 function connectWS() {
   const proto = location.protocol==='https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}/ws`);
   ws.onopen = () => { connStatus.className='status-dot online'; connStatus.title='已连接'; };
-  ws.onclose = () => { connStatus.className='status-dot offline'; connStatus.title='未连接'; setTimeout(connectWS,3000); };
+  ws.onclose = () => {
+    connStatus.className='status-dot offline'; connStatus.title='未连接';
+    // 断连时如果正在等待响应，重置状态
+    if (isStreaming) {
+      finishStreaming(); closeGroup(); setStreaming(false);
+      appendSystemMsg('连接断开，请求已中断', 'error');
+    }
+    if (wsActivityTimer) { clearTimeout(wsActivityTimer); wsActivityTimer = null; }
+    setTimeout(connectWS, 3000);
+  };
   ws.onerror = () => {};
   ws.onmessage = e => { try { handleMsg(JSON.parse(e.data)); } catch(err) { console.error('[ws parse]', err); } };
 }
@@ -1031,15 +1286,17 @@ function wsSend(d) { if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringi
 
 // --- Message dispatch ---
 function handleMsg(msg) {
+  // 收到任何消息都重置超时计时器
+  if (isStreaming) resetActivityTimer();
   switch(msg.type) {
     case 'session-created': sessionId=msg.sessionId; sessionInfo.textContent='会话: '+sessionId.slice(0,8)+'...'; updatePageTitle(); break;
     case 'claude-response': handleClaudeResponse(msg.data); break;
-    case 'claude-complete': finishStreaming(); closeGroup(); setStreaming(false); loadProjects().then(() => updatePageTitle(getSessionSummary(sessionId))); break;
-    case 'claude-error': finishStreaming(); closeGroup(); setStreaming(false); appendSystemMsg('错误: '+msg.error,'error'); break;
-    case 'session-aborted': finishStreaming(); closeGroup(); setStreaming(false); appendSystemMsg('会话已停止'); break;
-    case 'permission-request': showPermission(msg); break;
+    case 'claude-complete': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} loadProjects().then(() => updatePageTitle(getSessionSummary(sessionId))); break;
+    case 'claude-error': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} appendSystemMsg('错误: '+msg.error,'error'); break;
+    case 'session-aborted': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} appendSystemMsg('会话已停止'); break;
+    case 'permission-request': showPermission(msg); resetActivityTimer(); break;
     case 'permission-cancelled': permBanner.classList.add('hidden'); break;
-    case 'plan-execution-request': showPlanExecutionConfirm(msg); break;
+    case 'plan-execution-request': showPlanExecutionConfirm(msg); resetActivityTimer(); break;
     case 'plan-mode-updated': planModeEnabled = msg.enabled; break;
     // /btw 快速补充
     case 'btw-response': handleBtwResponse(msg); break;
@@ -1810,6 +2067,7 @@ async function send() {
     apiKey, baseUrl, effortLevel });
   pendingImages = []; renderImagePreviews();
   setStreaming(true);
+  resetActivityTimer(); // 启动前端兜底超时
 }
 function abort() { if(sessionId) wsSend({type:'abort-session',sessionId}); }
 function newSession() { sessionId=null; messagesEl.innerHTML=''; sessionInfo.textContent=''; finishStreaming(); closeGroup(); setStreaming(false); pendingImages=[]; renderImagePreviews(); renderSidebar(); updatePageTitle(); }
@@ -2621,6 +2879,8 @@ async function viewFile(filePath) {
 
 // ========== Folder Browser (Fix 5) ==========
 let fbCurrentPath = '';
+let fbCurrentDirs = []; // 当前目录列表，用于搜索过滤
+let fbCurrentParent = null; // 当前父目录路径
 
 cwdBrowseBtn.addEventListener('click', () => openFolderBrowser(cwdInput.value || ''));
 cwdOpenBtn.addEventListener('click', () => {
@@ -2656,6 +2916,7 @@ function closeFolderBrowser() { folderBrowser.classList.add('hidden'); }
 
 async function openFolderBrowser(startPath) {
   folderBrowser.classList.remove('hidden');
+  fbSearchInput.value = '';
   await browseTo(startPath);
 }
 
@@ -2664,27 +2925,44 @@ async function browseTo(targetPath) {
     const res = await (await fetch('/api/browse?path=' + encodeURIComponent(targetPath || ''))).json();
     if(res.error) { fbBody.innerHTML = `<div style="padding:16px;color:var(--red)">${escHtml(res.error)}</div>`; return; }
     fbCurrentPath = res.path || '';
+    fbCurrentParent = res.parent || null;
+    fbCurrentDirs = res.dirs || [];
     fbPath.textContent = fbCurrentPath || '我的电脑';
-    fbBody.innerHTML = '';
-    // Parent directory
-    if(res.parent) {
-      const item = document.createElement('div'); item.className = 'folder-item';
-      item.innerHTML = '<span class="fi-icon">⬆</span><span>.. 返回上级</span>';
-      item.addEventListener('click', () => browseTo(res.parent));
-      fbBody.appendChild(item);
-    }
-    // Subdirectories
-    for(const dir of res.dirs) {
-      const item = document.createElement('div'); item.className = 'folder-item';
-      item.innerHTML = `<span class="fi-icon">📁</span><span>${escHtml(dir.name)}</span>`;
-      item.addEventListener('click', () => browseTo(dir.path));
-      fbBody.appendChild(item);
-    }
-    if(!res.dirs.length && !res.parent) {
-      fbBody.innerHTML = '<div style="padding:16px;color:var(--text-secondary);text-align:center">空目录</div>';
-    }
+    fbSearchInput.value = '';
+    renderFolderList(fbCurrentDirs, fbCurrentParent);
   } catch(e) { fbBody.innerHTML = `<div style="padding:16px;color:var(--red)">${escHtml(e.message)}</div>`; }
 }
+
+function renderFolderList(dirs, parent, filter) {
+  fbBody.innerHTML = '';
+  // Parent directory (搜索时隐藏返回上级)
+  if(parent && !filter) {
+    const item = document.createElement('div'); item.className = 'folder-item';
+    item.innerHTML = '<span class="fi-icon">⬆</span><span>.. 返回上级</span>';
+    item.addEventListener('click', () => browseTo(parent));
+    fbBody.appendChild(item);
+  }
+  // 过滤目录
+  const filtered = filter ? dirs.filter(d => d.name.toLowerCase().includes(filter.toLowerCase())) : dirs;
+  // Subdirectories
+  for(const dir of filtered) {
+    const item = document.createElement('div'); item.className = 'folder-item';
+    item.innerHTML = `<span class="fi-icon">📁</span><span>${escHtml(dir.name)}</span>`;
+    item.addEventListener('click', () => browseTo(dir.path));
+    fbBody.appendChild(item);
+  }
+  if(!filtered.length && !parent) {
+    fbBody.innerHTML = '<div style="padding:16px;color:var(--text-secondary);text-align:center">空目录</div>';
+  } else if(filter && !filtered.length) {
+    fbBody.innerHTML = '<div style="padding:16px;color:var(--text-secondary);text-align:center">无匹配结果</div>';
+  }
+}
+
+// 搜索过滤
+fbSearchInput.addEventListener('input', () => {
+  const keyword = fbSearchInput.value.trim();
+  renderFolderList(fbCurrentDirs, fbCurrentParent, keyword || undefined);
+});
 
 // ========== Token Donut ==========
 
