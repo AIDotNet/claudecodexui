@@ -107,6 +107,77 @@ effortBtn.addEventListener('click', () => {
     .catch(err => console.warn('[effort sync]', err));
 });
 
+// --- Provider Switch (Claude / Codex) ---
+const providerSwitch = document.getElementById('providerSwitch');
+
+function applyProvider(provider) {
+  currentProvider = provider;
+  localStorage.setItem('yxcode_provider', provider);
+  document.querySelectorAll('.provider-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.provider === provider);
+  });
+  // 重新加载对应 Provider 的模型列表
+  loadModelsForProvider(provider);
+}
+
+// Provider 切换按钮事件
+providerSwitch.addEventListener('click', (e) => {
+  const btn = e.target.closest('.provider-btn');
+  if (!btn || btn.dataset.provider === currentProvider) return;
+  applyProvider(btn.dataset.provider);
+});
+
+// 加载指定 Provider 的模型列表（同一接口，按 provider 字段过滤）
+async function loadModelsForProvider(provider) {
+  try {
+    let allApiModels = [];
+    try {
+      allApiModels = await (await fetch('/api/models')).json();
+    } catch(e) { console.error('[loadModels]', e); }
+
+    // 按 provider 字段过滤：codex 只显示 provider 包含 "OpenAi" 的，claude 显示全部模型
+    let models;
+    if (provider === 'codex') {
+      models = allApiModels.filter(m => m.provider && m.provider.toLowerCase().includes('openai'));
+    } else {
+      models = allApiModels;
+    }
+
+    modelsData = models;
+    loadCustomModels();
+    modelSelectDropdown.innerHTML = '';
+    const allModels = [...models.map(m => ({...m, isCustom: false})), ...customModels];
+    allModels.forEach(m => {
+      const opt = document.createElement('div');
+      opt.className = 'model-select-option';
+      opt.dataset.value = m.value;
+      const iconHTML = m.icon ? `<img class="model-icon" src="${m.icon}" alt="">` : '<div class="model-icon-placeholder"></div>';
+      opt.innerHTML = `${iconHTML}<span class="model-label">${escHtml(m.label)}</span>${m.provider ? `<span class="model-provider">${escHtml(m.provider)}</span>` : ''}`;
+      opt.addEventListener('click', () => selectModel(m));
+      modelSelectDropdown.appendChild(opt);
+    });
+    renderSettingsModelDropdown();
+
+    // 恢复该 Provider 保存的模型
+    const savedKey = `yxcode_model_${provider}`;
+    const savedModelId = localStorage.getItem(savedKey) || localStorage.getItem('yxcode_model');
+    if (savedModelId) {
+      const allM = getAllModels();
+      const saved = allM.find(m => m.value === savedModelId);
+      if (saved) { selectModel(saved); selectSettingsModel(saved); return; }
+    }
+    // 默认选第一个
+    if (models.length > 0) { selectModel(models[0]); selectSettingsModel(models[0]); }
+  } catch(e) { console.error('[loadModelsForProvider]', e); }
+}
+
+// 初始化 Provider 状态（延迟到变量声明后执行）
+function initProviderUI() {
+  document.querySelectorAll('.provider-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.provider === currentProvider);
+  });
+}
+
 // --- Fullscreen Toggle ---
 const fullscreenBtn = document.getElementById('fullscreenBtn');
 const fullscreenIconExpand = document.getElementById('fullscreenIconExpand');
@@ -146,6 +217,7 @@ let customModels = []; // User-added custom models
 let rememberedPermissions = new Set(); // Remembered permission rules
 let cwdHistory = []; // Working directory history (max 10)
 let planModeEnabled = false; // 计划模式状态
+let currentProvider = localStorage.getItem('yxcode_provider') || 'claude'; // 'claude' | 'codex'
 // 图片粘贴相关
 let pendingImages = []; // 待发送的图片 [{data, mediaType, name}]
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -408,7 +480,7 @@ function runInit() {
     appendUserMsg('/init');
     promptInput.value = '';
     const baseUrl = localStorage.getItem('yxcode_baseUrl') || '';
-    wsSend({ type: 'claude-command', prompt: initPrompt, sessionId, cwd: cwdInput.value || null,
+    wsSend({ type: 'claude-command', provider: currentProvider, prompt: initPrompt, sessionId, cwd: cwdInput.value || null,
       model: selectedModel.value, permissionMode: permSelect.value, apiKey, baseUrl });
     setStreaming(true);
   }).catch(e => appendSystemMsg('加载提示词失败: ' + e.message, 'error'));
@@ -433,7 +505,7 @@ async function runCommit() {
     appendUserMsg('/commit');
     promptInput.value = '';
     const baseUrl = localStorage.getItem('yxcode_baseUrl') || '';
-    wsSend({ type: 'claude-command', prompt: commitPrompt, sessionId, cwd: cwdInput.value,
+    wsSend({ type: 'claude-command', provider: currentProvider, prompt: commitPrompt, sessionId, cwd: cwdInput.value,
       model: selectedModel.value, permissionMode: permSelect.value, apiKey, baseUrl });
     setStreaming(true);
   } catch(e) {
@@ -453,7 +525,7 @@ function runCompact() {
   promptInput.value = '';
   appendSystemMsg('正在压缩会话上下文…');
   const baseUrl = localStorage.getItem('yxcode_baseUrl') || '';
-  wsSend({ type: 'claude-command', prompt: '/compact', sessionId, cwd: cwdInput.value || null,
+  wsSend({ type: 'claude-command', provider: currentProvider, prompt: '/compact', sessionId, cwd: cwdInput.value || null,
     model: selectedModel.value, permissionMode: permSelect.value, apiKey, baseUrl });
   setStreaming(true);
 }
@@ -638,6 +710,7 @@ function selectModel(model) {
   label.textContent = model.label;
   modelSelectDropdown.classList.remove('visible');
   localStorage.setItem('yxcode_model', model.value);
+  localStorage.setItem(`yxcode_model_${currentProvider}`, model.value);
 }
 
 function selectSettingsModel(model) {
@@ -798,54 +871,18 @@ const TOOL_ICON = {
 
 // --- Init ---
 (async () => {
+  // 初始化 Provider UI
+  initProviderUI();
+
   // Fetch version from server
   try {
     const ver = await (await fetch('/api/version')).json();
     document.getElementById('appVersion').textContent = 'v' + ver.version;
   } catch(e) { console.error('[version]', e); }
 
-  try {
-    // 始终从 yxai.chat 加载模型列表，切换自定义 URL 时不隐藏
-    let models = [];
-    try {
-      models = await (await fetch('/api/models')).json();
-    } catch(e) { console.error('[loadModels from yxai.chat]', e); }
-    modelsData = models;
+  // 根据当前 Provider 加载模型列表
+  await loadModelsForProvider(currentProvider);
 
-    // Render main model dropdown (includes custom models)
-    loadCustomModels();
-    modelSelectDropdown.innerHTML = '';
-    const allMainModels = [...models.map(m => ({...m, isCustom: false})), ...customModels];
-    allMainModels.forEach(m => {
-      const opt = document.createElement('div');
-      opt.className = 'model-select-option';
-      opt.dataset.value = m.value;
-      const iconHTML = m.icon ? `<img class="model-icon" src="${m.icon}" alt="">` : '<div class="model-icon-placeholder"></div>';
-      opt.innerHTML = `${iconHTML}<span class="model-label">${escHtml(m.label)}</span>${m.provider ? `<span class="model-provider">${escHtml(m.provider)}</span>` : ''}`;
-      opt.addEventListener('click', () => selectModel(m));
-      modelSelectDropdown.appendChild(opt);
-    });
-
-    // Render settings model dropdown with search
-    renderSettingsModelDropdown();
-
-    // Store models data for header display
-    window._yxModels = models;
-
-    // Restore saved model
-    const savedModelId = localStorage.getItem('yxcode_model');
-    if (savedModelId) {
-      const allModels = getAllModels();
-      const savedModel = allModels.find(m => m.value === savedModelId);
-      if (savedModel) {
-        selectModel(savedModel);
-        selectSettingsModel(savedModel);
-      }
-    } else if (models.length > 0) {
-      selectModel(models[0]);
-      selectSettingsModel(models[0]);
-    }
-  } catch(e) { console.error('[loadModels]', e); }
   cwdInput.value = localStorage.getItem('yxcode_cwd') || '';
   setApiKey.value = localStorage.getItem('yxcode_apiKey') || '';
   setBaseUrl.value = localStorage.getItem('yxcode_baseUrl') || '';
@@ -1294,9 +1331,9 @@ function handleMsg(msg) {
     case 'claude-complete': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} loadProjects().then(() => updatePageTitle(getSessionSummary(sessionId))); break;
     case 'claude-error': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} appendSystemMsg('错误: '+msg.error,'error'); break;
     case 'session-aborted': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} appendSystemMsg('会话已停止'); break;
-    case 'permission-request': showPermission(msg); resetActivityTimer(); break;
-    case 'permission-cancelled': permBanner.classList.add('hidden'); break;
-    case 'plan-execution-request': showPlanExecutionConfirm(msg); resetActivityTimer(); break;
+    case 'permission-request': showPermission(msg); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} break;
+    case 'permission-cancelled': permBanner.classList.add('hidden'); resetActivityTimer(); break;
+    case 'plan-execution-request': showPlanExecutionConfirm(msg); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} break;
     case 'plan-mode-updated': planModeEnabled = msg.enabled; break;
     // /btw 快速补充
     case 'btw-response': handleBtwResponse(msg); break;
@@ -1795,6 +1832,7 @@ function showPermission(msg) {
         wsSend({ type:'permission-response', requestId:rid, allow:false, message:'User denied' });
       }
       permBanner.classList.add('hidden');
+      resetActivityTimer(); // 审批完成，恢复超时计时
     });
   });
   scrollBottom();
@@ -1899,7 +1937,8 @@ function ensureGroup() {
   g.className = 'msg-group';
   const copyBtn = `<button class="msg-action-btn" data-action="copy" title="复制"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>`;
   const retryBtn = `<button class="msg-action-btn" data-action="retry" title="重试"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>`;
-  g.innerHTML = `<div class="group-header"><div class="role streaming-dot">Claude</div></div><div class="group-body"></div><div class="msg-actions">${copyBtn}${retryBtn}</div>`;
+  const providerLabel = currentProvider === 'codex' ? 'Codex' : 'Claude';
+  g.innerHTML = `<div class="group-header"><div class="role streaming-dot">${providerLabel}</div></div><div class="group-body"></div><div class="msg-actions">${copyBtn}${retryBtn}</div>`;
   messagesEl.appendChild(g);
   currentGroup = g;
   return g;
@@ -2042,8 +2081,12 @@ async function send() {
     }
   }
 
-  const apiKey = localStorage.getItem('yxcode_apiKey')||'';
-  if(!apiKey) { appendSystemMsg('请先在设置中配置 API Key', 'error'); settingsOverlay.classList.remove('hidden'); return; }
+  const apiKey = localStorage.getItem('yxcode_apiKey') || '';
+  if(!apiKey) {
+    appendSystemMsg('请先在设置中配置 API Key', 'error');
+    settingsOverlay.classList.remove('hidden');
+    return;
+  }
   if(!selectedModel) { appendSystemMsg('请先选择模型', 'error'); return; }
   if(!cwdInput.value.trim()) { appendSystemMsg('请先设置工作目录', 'error'); cwdInput.focus(); return; }
 
@@ -2062,7 +2105,7 @@ async function send() {
   const images = pendingImages.length > 0 ? pendingImages.map(img => ({ data: img.data, mediaType: img.mediaType })) : null;
   appendUserMsg(t, images); promptInput.value='';
   const baseUrl = localStorage.getItem('yxcode_baseUrl') || '';
-  wsSend({ type:'claude-command', prompt:finalPrompt, images, sessionId, cwd:cwdInput.value||null,
+  wsSend({ type:'claude-command', provider: currentProvider, prompt:finalPrompt, images, sessionId, cwd:cwdInput.value||null,
     model:selectedModel.value, permissionMode:permSelect.value,
     apiKey, baseUrl, effortLevel });
   pendingImages = []; renderImagePreviews();

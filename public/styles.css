@@ -398,6 +398,45 @@ select:focus,
   font-size: 12px;
 }
 
+/* Provider Switch (Claude / Codex) */
+.provider-switch {
+  display: flex;
+  gap: 2px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  padding: 2px;
+  align-items: center;
+}
+
+.provider-btn {
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all var(--transition-base);
+  white-space: nowrap;
+}
+
+.provider-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+}
+
+.provider-btn.active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 3px rgba(249, 115, 22, 0.3);
+}
+
+[data-theme="light"] .provider-btn.active {
+  box-shadow: 0 1px 3px rgba(249, 115, 22, 0.2);
+}
+
 /* Custom Model Select - Premium Design */
 .model-select-wrapper {
   position: relative;

@@ -10,6 +10,7 @@ import express from 'express';
 import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
+import { Codex } from '@openai/codex-sdk';
 import crypto from 'crypto';
 import path from 'path';
 import os from 'os';
@@ -64,6 +65,7 @@ const API_BASE_URL = 'https://yxai.chat';
 
 // --- Session & Permission State ---
 const activeSessions = new Map();
+const activeCodexSessions = new Map(); // sessionId -> { thread, codex, abortController, status }
 const pendingApprovals = new Map();
 const planModeStates = new Map(); // sessionId -> { enabled: boolean, pendingPlan: boolean }
 const pendingBtwMessages = new Map(); // ws -> [{ question, answer }]  /btw 待注入队列
@@ -95,11 +97,9 @@ function wsSend(ws, data) {
 function waitForApproval(requestId, signal, ws) {
   return new Promise((resolve) => {
     let settled = false;
-    let timer = null;
     const finalize = (v) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
       pendingApprovals.delete(requestId);
       if (signal) signal.removeEventListener('abort', onAbort);
       if (ws) ws.removeEventListener('close', onWsClose);
@@ -115,11 +115,7 @@ function waitForApproval(requestId, signal, ws) {
     if (ws) {
       ws.addEventListener('close', onWsClose, { once: true });
     }
-    // 审批超时：5 分钟无响应自动取消
-    timer = setTimeout(() => {
-      console.log(`[approval] 请求 ${requestId} 审批超时`);
-      finalize({ cancelled: true });
-    }, REQUEST_TIMEOUT_MS);
+    // 审批不设超时，用户可以花任意时间决定
     pendingApprovals.set(requestId, finalize);
   });
 }
@@ -472,6 +468,464 @@ async function syncSettingsFile(apiKey, baseUrl, model, effortLevel) {
     console.warn(`[settings sync] ${e.message}`);
   }
 }
+
+// --- Codex 模型列表 ---
+const CODEX_MODELS = [
+  { value: 'o4-mini', label: 'o4-mini', provider: 'OpenAI', description: 'OpenAI o4-mini' },
+  { value: 'o3', label: 'o3', provider: 'OpenAI', description: 'OpenAI o3' },
+  { value: 'gpt-4.1', label: 'GPT-4.1', provider: 'OpenAI', description: 'OpenAI GPT-4.1' },
+  { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', provider: 'OpenAI', description: 'OpenAI GPT-4.1 Mini' },
+  { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', provider: 'OpenAI', description: 'OpenAI GPT-4.1 Nano' },
+  { value: 'codex-mini', label: 'Codex Mini', provider: 'OpenAI', description: 'OpenAI Codex Mini' },
+];
+
+// --- Codex 权限模式映射 ---
+function getCodexPermissions(permissionMode) {
+  switch (permissionMode) {
+    case 'bypassPermissions':
+      return { sandboxMode: 'danger-full-access', approvalPolicy: 'never' };
+    case 'acceptEdits':
+      return { sandboxMode: 'workspace-write', approvalPolicy: 'never' };
+    default:
+      return { sandboxMode: 'workspace-write', approvalPolicy: 'never' };
+  }
+}
+
+// --- Codex 检测 ---
+function checkCodexInstalled() {
+  return new Promise((resolve) => {
+    exec('codex --version', (err) => {
+      resolve(!err);
+    });
+  });
+}
+
+// --- Codex 事件归一化：将 Codex SDK 事件转换为前端已能处理的 claude-response 格式 ---
+function normalizeCodexEvent(event, sessionId) {
+  const messages = [];
+
+  switch (event.type) {
+    case 'thread.started': {
+      const threadId = event.thread_id || event.id;
+      if (threadId) {
+        messages.push({ type: 'session-created', sessionId: threadId });
+      }
+      break;
+    }
+
+    case 'item.completed': {
+      const item = event.item;
+      if (!item) break;
+
+      switch (item.type) {
+        case 'agent_message':
+          // 文本消息 → assistant content
+          messages.push({
+            type: 'claude-response',
+            sessionId,
+            data: {
+              type: 'assistant',
+              message: {
+                role: 'assistant',
+                content: [{ type: 'text', text: item.text || item.content || '' }],
+              },
+              session_id: sessionId,
+            },
+          });
+          break;
+
+        case 'reasoning':
+          // 思考过程 → thinking block
+          messages.push({
+            type: 'claude-response',
+            sessionId,
+            data: {
+              type: 'assistant',
+              message: {
+                role: 'assistant',
+                content: [{ type: 'thinking', thinking: item.text || item.content || '' }],
+              },
+              session_id: sessionId,
+            },
+          });
+          break;
+
+        case 'command_execution': {
+          // 命令执行 → tool_use (Bash) + tool_result
+          const toolId = `codex_bash_${uid()}`;
+          messages.push({
+            type: 'claude-response',
+            sessionId,
+            data: {
+              type: 'assistant',
+              message: {
+                role: 'assistant',
+                content: [{
+                  type: 'tool_use',
+                  id: toolId,
+                  name: 'Bash',
+                  input: { command: item.command || '' },
+                }],
+              },
+              session_id: sessionId,
+            },
+          });
+          // 命令输出作为 tool_result
+          if (item.aggregated_output || item.output) {
+            messages.push({
+              type: 'claude-response',
+              sessionId,
+              data: {
+                type: 'tool_result',
+                message: {
+                  role: 'user',
+                  content: [{
+                    type: 'tool_result',
+                    tool_use_id: toolId,
+                    content: item.aggregated_output || item.output || '',
+                  }],
+                },
+                session_id: sessionId,
+              },
+            });
+          }
+          break;
+        }
+
+        case 'file_change': {
+          // 文件变更 → tool_use (Edit/Write)
+          const changes = item.changes || [];
+          for (const change of changes) {
+            const fileToolId = `codex_file_${uid()}`;
+            const toolName = change.type === 'create' ? 'Write' : 'Edit';
+            messages.push({
+              type: 'claude-response',
+              sessionId,
+              data: {
+                type: 'assistant',
+                message: {
+                  role: 'assistant',
+                  content: [{
+                    type: 'tool_use',
+                    id: fileToolId,
+                    name: toolName,
+                    input: {
+                      file_path: change.path || change.file || '',
+                      ...(toolName === 'Write'
+                        ? { content: change.content || change.after || '' }
+                        : { old_string: change.before || '', new_string: change.after || '' }),
+                    },
+                  }],
+                },
+                session_id: sessionId,
+              },
+            });
+            // 文件操作结果
+            messages.push({
+              type: 'claude-response',
+              sessionId,
+              data: {
+                type: 'tool_result',
+                message: {
+                  role: 'user',
+                  content: [{
+                    type: 'tool_result',
+                    tool_use_id: fileToolId,
+                    content: `文件 ${change.path || change.file || ''} 已${toolName === 'Write' ? '创建' : '修改'}`,
+                  }],
+                },
+                session_id: sessionId,
+              },
+            });
+          }
+          break;
+        }
+
+        case 'mcp_tool_call': {
+          // MCP 工具调用
+          const mcpToolId = `codex_mcp_${uid()}`;
+          messages.push({
+            type: 'claude-response',
+            sessionId,
+            data: {
+              type: 'assistant',
+              message: {
+                role: 'assistant',
+                content: [{
+                  type: 'tool_use',
+                  id: mcpToolId,
+                  name: `${item.server || 'mcp'}:${item.tool || 'unknown'}`,
+                  input: item.arguments || {},
+                }],
+              },
+              session_id: sessionId,
+            },
+          });
+          if (item.result || item.error) {
+            messages.push({
+              type: 'claude-response',
+              sessionId,
+              data: {
+                type: 'tool_result',
+                message: {
+                  role: 'user',
+                  content: [{
+                    type: 'tool_result',
+                    tool_use_id: mcpToolId,
+                    content: item.error || item.result || '',
+                  }],
+                },
+                session_id: sessionId,
+              },
+            });
+          }
+          break;
+        }
+
+        case 'web_search': {
+          // 网络搜索
+          const searchToolId = `codex_search_${uid()}`;
+          messages.push({
+            type: 'claude-response',
+            sessionId,
+            data: {
+              type: 'assistant',
+              message: {
+                role: 'assistant',
+                content: [{
+                  type: 'tool_use',
+                  id: searchToolId,
+                  name: 'WebSearch',
+                  input: { query: item.query || '' },
+                }],
+              },
+              session_id: sessionId,
+            },
+          });
+          break;
+        }
+
+        case 'error':
+          messages.push({
+            type: 'claude-error',
+            error: item.message || '未知错误',
+            sessionId,
+          });
+          break;
+
+        default:
+          // 未知类型，尝试作为文本输出
+          if (item.text || item.content) {
+            messages.push({
+              type: 'claude-response',
+              sessionId,
+              data: {
+                type: 'assistant',
+                message: {
+                  role: 'assistant',
+                  content: [{ type: 'text', text: item.text || item.content || '' }],
+                },
+                session_id: sessionId,
+              },
+            });
+          }
+          break;
+      }
+      break;
+    }
+
+    case 'turn.completed':
+      if (event.usage) {
+        const used = (event.usage.input_tokens || 0) + (event.usage.output_tokens || 0);
+        messages.push({ type: 'token-usage', used, sessionId });
+      }
+      break;
+
+    case 'turn.failed':
+      messages.push({
+        type: 'claude-error',
+        error: event.error?.message || event.error || '执行失败',
+        sessionId,
+      });
+      break;
+
+    // item.started / item.updated 跳过（只处理 completed）
+    default:
+      break;
+  }
+
+  return messages;
+}
+
+// --- Codex SDK Query ---
+async function runCodexQuery(prompt, options, ws) {
+  let sessionId = options.sessionId || null;
+
+  // 设置 OpenAI 环境变量（共用同一个 API Key，baseUrl 自动拼接 /v1）
+  const prevApiKey = process.env.OPENAI_API_KEY;
+  const prevBaseUrl = process.env.OPENAI_BASE_URL;
+
+  if (options.apiKey) {
+    process.env.OPENAI_API_KEY = options.apiKey;
+    console.log(`[codex config] OPENAI_API_KEY = ***${options.apiKey.slice(-6)}`);
+  }
+  // Codex 走 responses 接口，baseUrl 需要拼接 /v1
+  if (options.baseUrl && options.baseUrl.trim()) {
+    const base = options.baseUrl.trim().replace(/\/+$/, '');
+    const codexBaseUrl = base + '/v1';
+    process.env.OPENAI_BASE_URL = codexBaseUrl;
+    console.log(`[codex config] OPENAI_BASE_URL = ${codexBaseUrl}`);
+  }
+
+  const { sandboxMode, approvalPolicy } = getCodexPermissions(options.permissionMode);
+  const abortController = new AbortController();
+
+  // 对话日志
+  const logEntry = {
+    id: uid(),
+    url: options.baseUrl || 'https://api.openai.com',
+    model: options.model || 'o4-mini',
+    startTime: Date.now(),
+    endTime: null,
+    status: 'running',
+    error: null,
+  };
+  addRequestLog(logEntry);
+
+  const reqLogTime = new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  console.log(`[Codex Request] 模型: ${options.model || 'o4-mini'} | 时间: ${reqLogTime}`);
+
+  let codex, thread;
+
+  try {
+    codex = new Codex();
+
+    const threadOptions = {
+      workingDirectory: options.cwd || process.cwd(),
+      skipGitRepoCheck: true,
+      sandboxMode,
+      approvalPolicy,
+      model: options.model || 'o4-mini',
+    };
+
+    // 启动或恢复线程
+    if (sessionId) {
+      thread = codex.resumeThread(sessionId, threadOptions);
+    } else {
+      thread = codex.startThread(threadOptions);
+    }
+
+    // 注册会话
+    const registerSession = (id) => {
+      if (!id) return;
+      activeCodexSessions.set(id, { thread, codex, abortController, status: 'running' });
+    };
+    if (sessionId) registerSession(sessionId);
+
+    // 5 分钟超时机制
+    let lastActivity = Date.now();
+    let timeoutTimer = setInterval(() => {
+      if (Date.now() - lastActivity > REQUEST_TIMEOUT_MS) {
+        console.error(`[codex timeout] 请求超时（${REQUEST_TIMEOUT_MS / 1000}s 无活动）`);
+        clearInterval(timeoutTimer);
+        timeoutTimer = null;
+        abortController.abort();
+        wsSend(ws, { type: 'claude-error', error: `请求超时（${REQUEST_TIMEOUT_MS / 1000}秒无响应）`, sessionId });
+      }
+    }, 5000);
+
+    // WebSocket 断连时中断
+    const onWsClose = () => {
+      console.log(`[codex ws-close] 客户端断连，中断查询 ${sessionId || '(无session)'}`);
+      abortController.abort();
+      if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
+    };
+    ws.addEventListener('close', onWsClose, { once: true });
+
+    // 执行流式查询
+    const streamedTurn = await thread.runStreamed(prompt, {
+      signal: abortController.signal,
+    });
+
+    for await (const event of streamedTurn.events) {
+      lastActivity = Date.now();
+
+      // 检查是否已中止
+      if (abortController.signal.aborted) break;
+      if (sessionId) {
+        const session = activeCodexSessions.get(sessionId);
+        if (session?.status === 'aborted') break;
+      }
+
+      // 捕获 session ID
+      if (event.type === 'thread.started') {
+        const discoveredId = event.thread_id || event.id;
+        if (discoveredId && !sessionId) {
+          sessionId = discoveredId;
+          registerSession(sessionId);
+          wsSend(ws, { type: 'session-created', sessionId });
+        }
+      }
+
+      // 跳过中间状态事件
+      if (event.type === 'item.started' || event.type === 'item.updated') continue;
+
+      // 归一化并发送
+      const normalized = normalizeCodexEvent(event, sessionId);
+      for (const msg of normalized) {
+        wsSend(ws, msg);
+      }
+    }
+
+    // 完成
+    wsSend(ws, { type: 'claude-complete', sessionId });
+    logEntry.status = 'completed';
+    logEntry.endTime = Date.now();
+
+    // 清理
+    if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
+    ws.removeEventListener('close', onWsClose);
+
+  } catch (err) {
+    const wasAborted = abortController.signal.aborted ||
+      err?.name === 'AbortError' ||
+      String(err?.message || '').toLowerCase().includes('aborted');
+
+    if (!wasAborted) {
+      console.error('[Codex error]', err.message);
+      const errorMsg = err.message?.includes('OPENAI_API_KEY')
+        ? 'Codex 需要配置 OpenAI API Key，请在设置中填写。'
+        : err.message;
+      wsSend(ws, { type: 'claude-error', error: errorMsg, sessionId });
+    } else {
+      wsSend(ws, { type: 'session-aborted', sessionId });
+    }
+    logEntry.status = wasAborted ? 'aborted' : 'error';
+    logEntry.endTime = Date.now();
+    logEntry.error = wasAborted ? 'aborted' : err.message;
+  } finally {
+    // 清理会话
+    if (sessionId) {
+      const session = activeCodexSessions.get(sessionId);
+      if (session) session.status = session.status === 'aborted' ? 'aborted' : 'completed';
+    }
+    // 恢复环境变量
+    if (prevApiKey !== undefined) process.env.OPENAI_API_KEY = prevApiKey;
+    else delete process.env.OPENAI_API_KEY;
+    if (prevBaseUrl !== undefined) process.env.OPENAI_BASE_URL = prevBaseUrl;
+    else delete process.env.OPENAI_BASE_URL;
+  }
+}
+
+// --- 定期清理已完成的 Codex 会话 ---
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of activeCodexSessions.entries()) {
+    if (session.status !== 'running' && now - (session.startedAt || 0) > 30 * 60 * 1000) {
+      activeCodexSessions.delete(id);
+    }
+  }
+}, 5 * 60 * 1000);
 
 // --- Parse session info (Fix 4: scan full file for meaningful title) ---
 const SYSTEM_TEXT_RE = /^(<system-reminder>|<command-name>|<local-command-|Caveat:)/;
@@ -1017,27 +1471,51 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'claude-command': {
-        console.log(`[WS] claude-command 收到: baseUrl="${msg.baseUrl}", apiKey=${msg.apiKey ? '***' + msg.apiKey.slice(-6) : '(空)'}, model="${msg.model}"`);
-        const hasClaudeCli = await checkClaudeInstalled();
-        if (!hasClaudeCli) {
-          wsSend(ws, {
-            type: 'claude-error',
-            error: '意心Code 底层依赖于 Claude Code，当前未检测到 Claude 环境，请先安装 Claude Code。\n安装命令：npm install -g @anthropic-ai/claude-code',
+        const provider = msg.provider || 'claude';
+        console.log(`[WS] claude-command 收到: provider="${provider}", baseUrl="${msg.baseUrl}", apiKey=${msg.apiKey ? '***' + msg.apiKey.slice(-6) : '(空)'}, model="${msg.model}"`);
+
+        if (provider === 'codex') {
+          // Codex 模式
+          const hasCodex = await checkCodexInstalled();
+          if (!hasCodex && !msg.apiKey) {
+            wsSend(ws, {
+              type: 'claude-error',
+              error: '当前未检测到 Codex CLI 环境且未配置 OpenAI API Key。\n请安装 Codex CLI：npm install -g @openai/codex\n或在设置中填写 OpenAI API Key。',
+              sessionId: msg.sessionId || null,
+            });
+            break;
+          }
+          runCodexQuery(msg.prompt, {
             sessionId: msg.sessionId || null,
-          });
-          break;
+            cwd: msg.cwd || null,
+            model: msg.model || 'o4-mini',
+            permissionMode: msg.permissionMode || 'default',
+            apiKey: msg.apiKey || null,
+            baseUrl: msg.baseUrl || null,
+          }, ws).catch((e) => console.error('[codex query error]', e.message));
+        } else {
+          // Claude 模式（原有逻辑）
+          const hasClaudeCli = await checkClaudeInstalled();
+          if (!hasClaudeCli) {
+            wsSend(ws, {
+              type: 'claude-error',
+              error: '意心Code 底层依赖于 Claude Code，当前未检测到 Claude 环境，请先安装 Claude Code。\n安装命令：npm install -g @anthropic-ai/claude-code',
+              sessionId: msg.sessionId || null,
+            });
+            break;
+          }
+          // 每次查询前同步设置到 ~/.claude/settings.json
+          await syncSettingsFile(msg.apiKey, msg.baseUrl, msg.model, msg.effortLevel);
+          runQuery(msg.prompt, {
+            sessionId: msg.sessionId || null,
+            cwd: msg.cwd || null,
+            model: msg.model || 'sonnet',
+            permissionMode: msg.permissionMode || 'default',
+            apiKey: msg.apiKey || null,
+            baseUrl: msg.baseUrl || null,
+            images: msg.images || null,
+          }, ws).catch((e) => console.error('[query error]', e.message));
         }
-        // 每次查询前同步设置到 ~/.claude/settings.json
-        await syncSettingsFile(msg.apiKey, msg.baseUrl, msg.model, msg.effortLevel);
-        runQuery(msg.prompt, {
-          sessionId: msg.sessionId || null,
-          cwd: msg.cwd || null,
-          model: msg.model || 'sonnet',
-          permissionMode: msg.permissionMode || 'default',
-          apiKey: msg.apiKey || null,
-          baseUrl: msg.baseUrl || null,
-          images: msg.images || null,
-        }, ws).catch((e) => console.error('[query error]', e.message));
         break;
       }
 
@@ -1062,11 +1540,21 @@ wss.on('connection', (ws) => {
         break;
 
       case 'abort-session':
-        if (msg.sessionId && activeSessions.has(msg.sessionId)) {
-          const qi = activeSessions.get(msg.sessionId);
-          qi.interrupt().catch(() => {});
-          activeSessions.delete(msg.sessionId);
-          wsSend(ws, { type: 'session-aborted', sessionId: msg.sessionId });
+        if (msg.sessionId) {
+          // 尝试中止 Claude 会话
+          if (activeSessions.has(msg.sessionId)) {
+            const qi = activeSessions.get(msg.sessionId);
+            qi.interrupt().catch(() => {});
+            activeSessions.delete(msg.sessionId);
+            wsSend(ws, { type: 'session-aborted', sessionId: msg.sessionId });
+          }
+          // 尝试中止 Codex 会话
+          else if (activeCodexSessions.has(msg.sessionId)) {
+            const session = activeCodexSessions.get(msg.sessionId);
+            session.status = 'aborted';
+            session.abortController?.abort();
+            wsSend(ws, { type: 'session-aborted', sessionId: msg.sessionId });
+          }
         }
         break;
 
