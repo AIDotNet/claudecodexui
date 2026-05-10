@@ -5,7 +5,7 @@
 # @yxai/code
 
 <p align="center">
-  <strong>意心 Code</strong> - 无门槛的 Claude Code 可视化轻量工具
+  <strong>意心 Code</strong> - 无门槛的 Claude Code / Codex 可视化轻量工具
 </p>
 
 <p align="center">
@@ -23,10 +23,11 @@
 
 ## ✨ 简介
 
-一个基于 **Node.js/.Net10 + WebSocket + HTML/CSS/JS** 的可视化交互界面，让你可以通过 Web 界面与 Claude AI 进行交互。
+一个基于 **Node.js/.Net10 + WebSocket + HTML/CSS/JS** 的可视化交互界面，让你可以通过 Web 界面与 Claude Code / OpenAI Codex 进行交互。
 
-- 能力与 Claude Code 一致
-- 适合从 Trae、Cursor、对话式、插件式编程方式过渡到 Claude Code
+- 原生支持 **Claude Code** 和 **OpenAI Codex** 双底层引擎，可一键切换
+- 能力与 Claude Code / Codex CLI 一致
+- 适合从 Trae、Cursor、对话式、插件式编程方式过渡到 AI Coding Agent
 - 极简依赖，仅需 Node.js
 
 ---
@@ -55,17 +56,17 @@
 <tr>
 <td width="50%">
 
-### ⚡ 极致性能
-- 采用 WebSocket 实时通信
-- 极致优化
-- 轻量快速
+### ⚡ 双引擎支持
+- 原生支持 Claude Code 和 OpenAI Codex
+- 界面一键切换底层引擎
+- 统一的交互体验
 
 </td>
 <td width="50%">
 
 ### 📦 完整工具能力
-- 能力与 Claude Code 一致
-- 底层完全基于 Claude Code
+- 能力与 Claude Code / Codex CLI 一致
+- 底层完全基于原生 Agent SDK
 - 功能完整
 
 </td>
@@ -147,7 +148,8 @@ PORT=8080 yxai
 | 要求 | 版本 |
 |------|------|
 | Node.js | >= 22.0.0 |
-| Claude Code | 需前置安装（无需配置） |
+| Claude Code | 需前置安装（使用 Claude 引擎时） |
+| Codex CLI | 需前置安装（使用 Codex 引擎时） |
 
 ---
 

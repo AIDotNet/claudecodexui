@@ -452,8 +452,8 @@ select:focus,
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  min-width: 300px;
-  max-width: 360px;
+  min-width: 240px;
+  max-width: 300px;
   display: flex;
   align-items: center;
   position: relative;
@@ -2991,8 +2991,8 @@ body.panel-resizing {
   }
 
   .model-select-display {
-    min-width: 240px;
-    max-width: 280px;
+    min-width: 200px;
+    max-width: 240px;
   }
 }
 

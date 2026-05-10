@@ -5,7 +5,7 @@
 # @yxai/code
 
 <p align="center">
-  <strong>YxAi Code</strong> - Zero-barrier Visual Lightweight Tool for Claude Code
+  <strong>YxAi Code</strong> - Zero-barrier Visual Lightweight Tool for Claude Code / Codex
 </p>
 
 <p align="center">
@@ -23,10 +23,11 @@
 
 ## ✨ Introduction
 
-A visual interaction interface based on **Node.js / .NET 10 + WebSocket + HTML/CSS/JS**, allowing you to interact with Claude AI through a web interface.
+A visual interaction interface based on **Node.js / .NET 10 + WebSocket + HTML/CSS/JS**, allowing you to interact with Claude Code / OpenAI Codex through a web interface.
 
-- Consistent capabilities with Claude Code
-- Perfect for transitioning from Trae, Cursor, conversational, and plugin-based programming to Claude Code
+- Natively supports both **Claude Code** and **OpenAI Codex** engines, switchable with one click
+- Consistent capabilities with Claude Code / Codex CLI
+- Perfect for transitioning from Trae, Cursor, conversational, and plugin-based programming to AI Coding Agents
 - Minimal dependencies - only requires Node.js
 
 ---
@@ -55,17 +56,17 @@ A visual interaction interface based on **Node.js / .NET 10 + WebSocket + HTML/C
 <tr>
 <td width="50%">
 
-### ⚡ Extreme Performance
-- WebSocket real-time communication
-- Optimized for speed
-- Lightweight and fast
+### ⚡ Dual Engine Support
+- Natively supports Claude Code and OpenAI Codex
+- One-click engine switching in the UI
+- Unified interaction experience
 
 </td>
 <td width="50%">
 
 ### 📦 Full Tool Capabilities
-- Consistent with Claude Code capabilities
-- Fully based on Claude Code
+- Consistent with Claude Code / Codex CLI capabilities
+- Fully based on native Agent SDKs
 - Complete feature set
 
 </td>
@@ -147,7 +148,8 @@ PORT=8080 yxai
 | Requirement | Version |
 |-------------|---------|
 | Node.js     | >= 22.0.0 |
-| Claude Code | Prerequisite (no configuration needed) |
+| Claude Code | Prerequisite (when using Claude engine) |
+| Codex CLI   | Prerequisite (when using Codex engine) |
 
 ---
 
