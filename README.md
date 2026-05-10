@@ -93,12 +93,6 @@
 dotnet run --project dotnet/src/YxAi.DotNetHost
 ```
 
-### 微软生态展示价值
-
-- 展示项目同时覆盖 **Node.js** 与 **.NET** 双实现路径
-- 突出 **ASP.NET Core + WebSocket + Azure + Microsoft Foundry** 的工程整合能力
-- 适合用于微软 MVP、Azure AI、.NET 生态方向的项目案例说明
-
 ---
 
 ## 📦 安装

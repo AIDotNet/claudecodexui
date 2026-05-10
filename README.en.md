@@ -93,12 +93,6 @@ In addition to the default Node.js implementation, this repository also includes
 dotnet run --project dotnet/src/YxAi.DotNetHost
 ```
 
-### Showcase Value for Microsoft Ecosystem
-
-- Demonstrates both **Node.js** and **.NET** implementation paths in one project
-- Highlights engineering integration across **ASP.NET Core + WebSocket + Azure + Microsoft Foundry**
-- Suitable as a project reference for Microsoft MVP, Azure AI, and .NET ecosystem materials
-
 ---
 
 ## 📦 Installation
