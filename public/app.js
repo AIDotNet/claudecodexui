@@ -1287,20 +1287,6 @@ function closeSkillsPanel() {
 }
 
 // --- WebSocket ---
-let wsActivityTimer = null; // 前端兜底超时
-const WS_ACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 分钟
-
-function resetActivityTimer() {
-  if (wsActivityTimer) clearTimeout(wsActivityTimer);
-  if (!isStreaming) return;
-  wsActivityTimer = setTimeout(() => {
-    if (isStreaming) {
-      console.warn('[timeout] 5分钟无消息，自动结束等待');
-      finishStreaming(); closeGroup(); setStreaming(false);
-      appendSystemMsg('请求超时：5分钟未收到响应，已自动结束等待', 'error');
-    }
-  }, WS_ACTIVITY_TIMEOUT);
-}
 
 function connectWS() {
   const proto = location.protocol==='https:' ? 'wss:' : 'ws:';
@@ -1313,7 +1299,6 @@ function connectWS() {
       finishStreaming(); closeGroup(); setStreaming(false);
       appendSystemMsg('连接断开，请求已中断', 'error');
     }
-    if (wsActivityTimer) { clearTimeout(wsActivityTimer); wsActivityTimer = null; }
     setTimeout(connectWS, 3000);
   };
   ws.onerror = () => {};
@@ -1323,17 +1308,16 @@ function wsSend(d) { if(ws&&ws.readyState===WebSocket.OPEN) ws.send(JSON.stringi
 
 // --- Message dispatch ---
 function handleMsg(msg) {
-  // 收到任何消息都重置超时计时器
-  if (isStreaming) resetActivityTimer();
+  // 收到任何消息都分发处理
   switch(msg.type) {
     case 'session-created': sessionId=msg.sessionId; sessionInfo.textContent='会话: '+sessionId.slice(0,8)+'...'; updatePageTitle(); break;
     case 'claude-response': handleClaudeResponse(msg.data); break;
-    case 'claude-complete': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} loadProjects().then(() => updatePageTitle(getSessionSummary(sessionId))); break;
-    case 'claude-error': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} appendSystemMsg('错误: '+msg.error,'error'); break;
-    case 'session-aborted': finishStreaming(); closeGroup(); setStreaming(false); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} appendSystemMsg('会话已停止'); break;
-    case 'permission-request': showPermission(msg); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} break;
-    case 'permission-cancelled': permBanner.classList.add('hidden'); resetActivityTimer(); break;
-    case 'plan-execution-request': showPlanExecutionConfirm(msg); if(wsActivityTimer){clearTimeout(wsActivityTimer);wsActivityTimer=null;} break;
+    case 'claude-complete': finishStreaming(); closeGroup(); setStreaming(false); loadProjects().then(() => updatePageTitle(getSessionSummary(sessionId))); break;
+    case 'claude-error': finishStreaming(); closeGroup(); setStreaming(false); appendSystemMsg('错误: '+msg.error,'error'); break;
+    case 'session-aborted': finishStreaming(); closeGroup(); setStreaming(false); appendSystemMsg('会话已停止'); break;
+    case 'permission-request': showPermission(msg); break;
+    case 'permission-cancelled': permBanner.classList.add('hidden'); break;
+    case 'plan-execution-request': showPlanExecutionConfirm(msg); break;
     case 'plan-mode-updated': planModeEnabled = msg.enabled; break;
     // /btw 快速补充
     case 'btw-response': handleBtwResponse(msg); break;
@@ -1832,7 +1816,6 @@ function showPermission(msg) {
         wsSend({ type:'permission-response', requestId:rid, allow:false, message:'User denied' });
       }
       permBanner.classList.add('hidden');
-      resetActivityTimer(); // 审批完成，恢复超时计时
     });
   });
   scrollBottom();
@@ -2110,7 +2093,6 @@ async function send() {
     apiKey, baseUrl, effortLevel });
   pendingImages = []; renderImagePreviews();
   setStreaming(true);
-  resetActivityTimer(); // 启动前端兜底超时
 }
 function abort() { if(sessionId) wsSend({type:'abort-session',sessionId}); }
 function newSession() { sessionId=null; messagesEl.innerHTML=''; sessionInfo.textContent=''; finishStreaming(); closeGroup(); setStreaming(false); pendingImages=[]; renderImagePreviews(); renderSidebar(); updatePageTitle(); }

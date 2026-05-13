@@ -79,8 +79,6 @@ function addRequestLog(entry) {
   if (requestLogs.length > MAX_REQUEST_LOGS) requestLogs.length = MAX_REQUEST_LOGS;
 }
 
-// --- 请求超时配置 ---
-const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟
 
 // --- Helpers ---
 function uid() {
@@ -267,34 +265,15 @@ async function runQuery(prompt, options, ws) {
 
   if (sessionId) activeSessions.set(sessionId, qi);
 
-  // 5 分钟超时机制
-  let lastActivity = Date.now();
-  let timeoutTimer = null;
-  const resetTimeout = () => { lastActivity = Date.now(); };
-  const startTimeoutWatch = () => {
-    timeoutTimer = setInterval(() => {
-      if (Date.now() - lastActivity > REQUEST_TIMEOUT_MS) {
-        console.error(`[timeout] 请求超时（${REQUEST_TIMEOUT_MS / 1000}s 无活动）`);
-        clearInterval(timeoutTimer);
-        timeoutTimer = null;
-        qi.interrupt?.().catch(() => {});
-        wsSend(ws, { type: 'claude-error', error: `请求超时（${REQUEST_TIMEOUT_MS / 1000}秒无响应）`, sessionId });
-      }
-    }, 5000);
-  };
-  startTimeoutWatch();
-
   // WebSocket 断连时中断查询
   const onWsClose = () => {
     console.log(`[ws-close] 客户端断连，中断查询 ${sessionId || '(无session)'}`);
     qi.interrupt?.().catch(() => {});
-    if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
   };
   ws.addEventListener('close', onWsClose, { once: true });
 
   try {
     for await (const msg of qi) {
-      resetTimeout();
       // Capture session id
       if (msg.session_id && !sessionId) {
         sessionId = msg.session_id;
@@ -332,7 +311,6 @@ async function runQuery(prompt, options, ws) {
       activeSessions.set(sessionId, qi2);
 
       for await (const msg of qi2) {
-        resetTimeout();
         wsSend(ws, { type: 'claude-response', data: msg, sessionId });
         if (msg.type === 'result' && msg.modelUsage) {
           const mk = Object.keys(msg.modelUsage)[0];
@@ -359,7 +337,6 @@ async function runQuery(prompt, options, ws) {
     logEntry.endTime = Date.now();
     logEntry.error = err.message;
   } finally {
-    if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
     ws.removeEventListener('close', onWsClose);
     if (sessionId) activeSessions.delete(sessionId);
     // Restore env vars
@@ -822,23 +799,10 @@ async function runCodexQuery(prompt, options, ws) {
     };
     if (sessionId) registerSession(sessionId);
 
-    // 5 分钟超时机制
-    let lastActivity = Date.now();
-    let timeoutTimer = setInterval(() => {
-      if (Date.now() - lastActivity > REQUEST_TIMEOUT_MS) {
-        console.error(`[codex timeout] 请求超时（${REQUEST_TIMEOUT_MS / 1000}s 无活动）`);
-        clearInterval(timeoutTimer);
-        timeoutTimer = null;
-        abortController.abort();
-        wsSend(ws, { type: 'claude-error', error: `请求超时（${REQUEST_TIMEOUT_MS / 1000}秒无响应）`, sessionId });
-      }
-    }, 5000);
-
     // WebSocket 断连时中断
     const onWsClose = () => {
       console.log(`[codex ws-close] 客户端断连，中断查询 ${sessionId || '(无session)'}`);
       abortController.abort();
-      if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
     };
     ws.addEventListener('close', onWsClose, { once: true });
 
@@ -848,8 +812,6 @@ async function runCodexQuery(prompt, options, ws) {
     });
 
     for await (const event of streamedTurn.events) {
-      lastActivity = Date.now();
-
       // 检查是否已中止
       if (abortController.signal.aborted) break;
       if (sessionId) {
@@ -883,7 +845,6 @@ async function runCodexQuery(prompt, options, ws) {
     logEntry.endTime = Date.now();
 
     // 清理
-    if (timeoutTimer) { clearInterval(timeoutTimer); timeoutTimer = null; }
     ws.removeEventListener('close', onWsClose);
 
   } catch (err) {
